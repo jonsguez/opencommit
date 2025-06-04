@@ -19,6 +19,7 @@ import {
 } from '../utils/git';
 import { trytm } from '../utils/trytm';
 import { getConfig } from './config';
+import { splitCommit, getStagedDiff } from '../modules/splitCommit';
 
 const config = getConfig();
 
@@ -42,6 +43,7 @@ interface GenerateCommitMessageFromGitDiffParams {
   context?: string;
   fullGitMojiSpec?: boolean;
   skipCommitConfirmation?: boolean;
+  shouldSplit?: boolean;
 }
 
 const generateCommitMessageFromGitDiff = async ({
@@ -49,13 +51,96 @@ const generateCommitMessageFromGitDiff = async ({
   extraArgs,
   context = '',
   fullGitMojiSpec = false,
-  skipCommitConfirmation = false
+  skipCommitConfirmation = false,
+  shouldSplit = false
 }: GenerateCommitMessageFromGitDiffParams): Promise<void> => {
   await assertGitRepo();
   const commitGenerationSpinner = spinner();
   commitGenerationSpinner.start('Generating the commit message');
 
   try {
+    if (shouldSplit) {
+      commitGenerationSpinner.stop('Analyzing staged changes for potential splits');
+      const splitResult = await splitCommit(diff);
+
+      if (splitResult && splitResult.commits && splitResult.commits.length > 1) {
+        outro(
+          `AI suggests splitting the changes into ${splitResult.commits.length} commits:
+${chalk.grey('——————————————————')}
+${splitResult.commits.map((commit, i) =>
+            `${i + 1}. Files: ${commit.files.join(', ')}
+   Reason: ${commit.groupReason}`
+          ).join('\n\n')}
+${chalk.grey('——————————————————')}`
+        );
+
+        const shouldProceedWithSplit = await confirm({
+          message: 'Would you like to proceed with splitting the commits?'
+        });
+
+        if (isCancel(shouldProceedWithSplit)) process.exit(1);
+
+        if (shouldProceedWithSplit) {
+          // Process each commit group
+          for (const commitGroup of splitResult.commits) {
+            // Unstage all files first
+            await execa('git', ['reset', 'HEAD', '.']);
+
+            // Stage only the files for this commit
+            await execa('git', ['add', ...commitGroup.files]);
+
+            // Generate and commit message for this group
+            const groupDiff = await getStagedDiff();
+            let commitMessage = await generateCommitMessageByDiff(
+              groupDiff,
+              fullGitMojiSpec,
+              context
+            );
+
+            const messageTemplate = checkMessageTemplate(extraArgs);
+            if (messageTemplate) {
+              commitMessage = messageTemplate.replace(
+                config.OCO_MESSAGE_TEMPLATE_PLACEHOLDER,
+                commitMessage
+              );
+            }
+
+            outro(
+              `Committing group:
+${chalk.grey('——————————————————')}
+${commitMessage}
+${chalk.grey('——————————————————')}`
+            );
+
+            const isCommitConfirmedByUser =
+              skipCommitConfirmation ||
+              (await confirm({
+                message: 'Confirm this commit?'
+              }));
+
+            if (isCancel(isCommitConfirmedByUser)) process.exit(1);
+
+            if (isCommitConfirmedByUser) {
+              const committingChangesSpinner = spinner();
+              committingChangesSpinner.start('Committing the changes');
+              const { stdout } = await execa('git', [
+                'commit',
+                '-m',
+                commitMessage,
+                ...extraArgs
+              ]);
+              committingChangesSpinner.stop(
+                `${chalk.green('✔')} Successfully committed`
+              );
+              outro(stdout);
+            }
+          }
+          return;
+        }
+      }
+    }
+
+    // Original single commit logic
     let commitMessage = await generateCommitMessageByDiff(
       diff,
       fullGitMojiSpec,
@@ -158,13 +243,13 @@ ${chalk.grey('——————————————————')}`
 
         if (selectedRemote !== skipOption) {
           const pushSpinner = spinner();
-  
+
           pushSpinner.start(`Running 'git push ${selectedRemote}'`);
-  
+
           const { stdout } = await execa('git', ['push', selectedRemote]);
-  
+
           if (stdout) outro(stdout);
-  
+
           pushSpinner.stop(
             `${chalk.green(
               '✔'
@@ -205,7 +290,8 @@ export async function commit(
   context: string = '',
   isStageAllFlag: Boolean = false,
   fullGitMojiSpec: boolean = false,
-  skipCommitConfirmation: boolean = false
+  skipCommitConfirmation: boolean = false,
+  shouldSplit: boolean = false
 ) {
   if (isStageAllFlag) {
     const changedFiles = await getChangedFiles();
@@ -278,7 +364,8 @@ export async function commit(
       extraArgs,
       context,
       fullGitMojiSpec,
-      skipCommitConfirmation
+      skipCommitConfirmation,
+      shouldSplit
     })
   );
 

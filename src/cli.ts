@@ -35,6 +35,12 @@ cli(
         alias: 'y',
         description: 'Skip commit confirmation prompt',
         default: false
+      },
+      split: {
+        type: Boolean,
+        alias: 's',
+        description: 'Enable AI-powered commit splitting for staged changes',
+        default: false
       }
     },
     ignoreArgv: (type) => type === 'unknown-flag' || type === 'argument',
@@ -47,7 +53,7 @@ cli(
     if (await isHookCalled()) {
       prepareCommitMessageHook();
     } else {
-      commit(extraArgs, flags.context, false, flags.fgm, flags.yes);
+      commit(extraArgs, flags.context, false, flags.fgm, flags.yes, flags.split);
     }
   },
   extraArgs
